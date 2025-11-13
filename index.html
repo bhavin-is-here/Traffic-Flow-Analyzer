@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HERE Traffic Radius Viewer</title>
+
+  <!-- HERE Maps HARP (3D Engine) -->
+  <script src="https://js.api.here.com/v3/3.1/mapsjs-core.js"></script>
+  <script src="https://js.api.here.com/v3/3.1/mapsjs-service.js"></script>
+  <script src="https://js.api.here.com/v3/3.1/mapsjs-ui.js"></script>
+  <script src="https://js.api.here.com/v3/3.1/mapsjs-mapevents.js"></script>
+  <script src="https://js.api.here.com/v3/3.1/mapsjs-harp.js"></script>
+  <link rel="stylesheet" href="https://js.api.here.com/v3/3.1/mapsjs-ui.css" />
+
+  <!-- HERE Design System -->
+  <link href="https://platform.here.com/hds/hds-styles.css" rel="stylesheet" />
+  <script src="https://platform.here.com/hds/hds-webcomponents.js"></script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+      }
+      #mapContainer {
+        width: 100%;
+        height: 100%;
+        position: relative;
+      }
+      .hds-card {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        z-index: 10;
+        background:var(--hds-accent) ;
+        border-radius: 12px;
+        padding: 16px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        width: 260px;
+      }
+      .hds-card h3 {
+        margin-top: 0;
+      }
+      .hds-card input {
+        width: 100%;
+        padding: 8px;
+        margin-top: 10px;
+        border-radius: 6px;
+        border: 1px solid #ccc;
+      }
+      .hds-card button {
+        width: 100%;
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+
+  <body data-theme="hds-web-product-light-theme" data-styles="hds">
+    <div id="mapContainer"></div>
+
+    <div class="hds-card">
+      <h3>Traffic Radius Viewer</h3>
+      <label for="radius">Radius (meters)</label>
+      <input type="number" id="radius" value="1000" min="100" step="100" />
+      <button id="btnShowTraffic" class="hds-button hds-button--primary">
+        Show Traffic
+      </button>
+    </div>
+
+    <script>
+      const apiKey = "PzjrOvuQgsK609O19RsM87e0iOB1zkPFu21KQX8yqdo";
+
+      const platform = new H.service.Platform({ apikey: apiKey });
+      const engineType = H.Map.EngineType.HARP;
+      const defaultLayers = platform.createDefaultLayers({ engineType });
+
+      // Initialize Map
+      const map = new H.Map(
+        document.getElementById("mapContainer"),
+        defaultLayers.vector.normal.map,
+        {
+          engineType,
+          center: { lat: 52.52, lng: 13.405 },
+          zoom: 13,
+          pixelRatio: window.devicePixelRatio || 1,
+        }
+      );
+
+      new H.mapevents.Behavior(new H.mapevents.MapEvents(map));
+      const ui = H.ui.UI.createDefault(map, defaultLayers);
+      window.addEventListener("resize", () => map.getViewPort().resize());
+
+      let circleLayer = null;
+
+      // Helper: Draw circle
+      function drawCircle(radius) {
+        if (circleLayer) map.removeObject(circleLayer);
+
+        const center = map.getCenter();
+        const circle = new H.map.Circle(center, radius, {
+          style: {
+            fillColor: "rgba(0, 128, 255, 0.1)",
+            strokeColor: "rgba(0, 64, 128, 0.8)",
+            lineWidth: 2,
+          },
+        });
+        map.addObject(circle);
+        circleLayer = circle;
+        return circle;
+      }
+
+      // Helper: Check if point is inside circle
+      function isInsideCircle(point, circle) {
+        const center = circle.getCenter();
+        const dx = point.lat - center.lat;
+        const dy = point.lng - center.lng;
+        const distance = Math.sqrt(dx * dx + dy * dy) * 111139; // meters
+        return distance <= circle.getRadius();
+      }
+
+      // Fetch and draw traffic
+      async function fetchTraffic(radius) {
+        const center = map.getCenter();
+        const url = `https://data.traffic.hereapi.com/v7/flow?in=circle:${center.lat},${center.lng};r=${radius}&locationReferencing=shape&apiKey=${apiKey}`;
+
+        try {
+          const res = await fetch(url);
+          const data = await res.json();
+
+          if (!data.results || data.results.length === 0) {
+            alert("No traffic data found in this area.");
+            return;
+          }
+
+          data.results.forEach((item) => {
+            if (!item.location?.shape?.links) return;
+
+            const jamFactor = item.currentFlow.jamFactor;
+            let color = "green";
+            if (jamFactor > 4) color = "red";
+            else if (jamFactor > 2) color = "orange";
+
+            item.location.shape.links.forEach((link) => {
+              const lineString = new H.geo.LineString();
+              link.points.forEach((p) => {
+                if (isInsideCircle(p, circleLayer)) lineString.pushPoint(p);
+              });
+
+              if (lineString.getPointCount() < 2) return;
+
+              const polyline = new H.map.Polyline(lineString, {
+                style: { strokeColor: color, lineWidth: 5 },
+              });
+
+              polyline.setData(`
+                <b>${item.location.description || "Road segment"}</b><br>
+                Jam Factor: ${jamFactor.toFixed(1)}<br>
+                Speed: ${(item.currentFlow.speed * 3.6).toFixed(1)} km/h<br>
+                Free Flow: ${(item.currentFlow.freeFlow * 3.6).toFixed(1)} km/h
+              `);
+
+              polyline.addEventListener("tap", (evt) => {
+                const bubble = new H.ui.InfoBubble(evt.target.getGeometry().extractPoint(), {
+                  content: evt.target.getData(),
+                });
+                ui.addBubble(bubble);
+              });
+
+              map.addObject(polyline);
+            });
+          });
+
+          alert(`${data.results.length} traffic segments shown.`);
+        } catch (err) {
+          console.error(err);
+          alert("Error fetching traffic data.");
+        }
+      }
+
+      document
+        .getElementById("btnShowTraffic")
+        .addEventListener("click", async () => {
+          const radius = parseInt(document.getElementById("radius").value);
+          drawCircle(radius);
+          await fetchTraffic(radius);
+        });
+    </script>
+  </body>
+</html>
